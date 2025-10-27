@@ -11,7 +11,7 @@ from einops import rearrange, repeat
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.model_executor import SamplingMetadata
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -156,6 +156,7 @@ class DeepseekOCRMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         
         
@@ -169,9 +170,14 @@ class DeepseekOCRMultiModalProcessor(
 
         else:
             tokenizer = self.info.get_tokenizer()
-            processed_outputs = tokenizer(prompt,
-                                          add_special_tokens=True,
-                                          return_tensors="pt")
+            # Apply tokenization kwargs if provided
+            tokenizer_args = {
+                "add_special_tokens": True,
+                "return_tensors": "pt"
+            }
+            if tok_kwargs:
+                tokenizer_args.update(tok_kwargs)
+            processed_outputs = tokenizer(prompt, **tokenizer_args)
 
         return processed_outputs
 
@@ -233,6 +239,8 @@ class DeepseekOCRMultiModalProcessor(
         prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object] = {},
+        **kwargs: object,
     ) -> tuple[list[int], MultiModalKwargs, bool]:
         # The processor logic is different for len(images) <= 2 vs > 2
         # Since the processing cache assumes that the processor output is
@@ -251,6 +259,8 @@ class DeepseekOCRMultiModalProcessor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
+            **kwargs,
         )
 
 
@@ -555,8 +565,14 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+        sampling_metadata: Optional[SamplingMetadata] = None,
     ) -> Optional[torch.Tensor]:
+        # V1 engine calls compute_logits without sampling_metadata during profiling
+        if sampling_metadata is None:
+            # For V1 compatibility during profiling - just return raw logits
+            return self.language_model.logits_processor(
+                self.language_model.lm_head, hidden_states, None
+            )
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
