@@ -1,0 +1,17 @@
+addict==2.4.0
+easydict==1.13
+einops==0.8.1
+fastapi==0.120.0
+numpy==2.2.6
+pydantic==2.12.3
+Pillow
+PyMuPDF
+img2pdf
+requests==2.32.5
+tokenizers==0.22.1
+torch==2.8.0
+torchaudio==2.8.0
+torchvision==0.23.0
+transformers==4.57.1
+uvicorn==0.38.0
+vllm==0.11.0

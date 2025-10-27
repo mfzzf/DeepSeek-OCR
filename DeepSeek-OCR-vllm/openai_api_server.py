@@ -304,6 +304,7 @@ async def generate_stream(
     printed_length = 0
     token_count = 0
     iteration_count = 0
+    full_text = ""
     async for request_output in engine.generate(request, sampling_params, request_id):
         iteration_count += 1
         if request_output.outputs:
@@ -337,13 +338,13 @@ async def generate_stream(
     # Final chunk with finish_reason
     elapsed_time = time.time() - start_time
     
-    if printed_length == 0:
-        logger.warning(f"[{request_id}] Streaming generated empty response!")
-    else:
-        # Log a preview of the first output chunk for verification
-        if printed_length > 0:
-            # Get the last full_text for preview (stored in last iteration)
-            logger.debug(f"[{request_id}] First 200 chars of output: {full_text[:200].replace(chr(10), '\\n')}")
+    # if printed_length == 0:
+    #     logger.warning(f"[{request_id}] Streaming generated empty response!")
+    # else:
+    #     # Log a preview of the first output chunk for verification
+    #     if printed_length > 0:
+    #         # Get the last full_text for preview (stored in last iteration)
+    #         logger.debug(f"[{request_id}] First 200 chars of output: {full_text[:200].replace(chr(10), '\\n')}")
     
     throughput_stream = printed_length / elapsed_time if elapsed_time > 0 and printed_length > 0 else 0.0
     logger.info(f"[{request_id}] Streaming generation complete: "

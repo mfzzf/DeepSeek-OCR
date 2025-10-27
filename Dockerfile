@@ -1,21 +1,61 @@
 # DeepSeek-OCR vLLM API Server Dockerfile
-# Using official vLLM image as base (includes PyTorch, CUDA, and vLLM)
-# Using CUDA 12.4 compatible version
-FROM vllm/vllm-openai:v0.6.4.post1-cu124
+# Alternative build for CUDA 12.4 compatibility
+# This builds with specific CUDA version
+
+FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
 
 # Set environment variables
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    CUDA_HOME=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3-pip \
+    python3-dev \
+    git \
+    wget \
+    curl \
+    ca-certificates \
+    build-essential \
+    cmake \
+    ninja-build \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create symlink for python
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+
+# Upgrade pip
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Set working directory
 WORKDIR /app
 
-# Copy requirements files first (for better caching)
+# Install PyTorch with CUDA 12.4 support
+RUN pip install --no-cache-dir \
+    torch==2.4.0 \
+    torchvision==0.19.0 \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# Install vLLM from PyPI (compatible with CUDA 12.4)
+RUN pip install --no-cache-dir vllm==0.6.4.post1
+
+# Copy requirements files
 COPY requirements.txt /app/
 COPY DeepSeek-OCR-vllm/requirements_api.txt /app/
 
-# Install additional dependencies
-# vLLM, PyTorch, FastAPI, Uvicorn are already in the base image
+# Install other dependencies
 RUN pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir -r requirements_api.txt
 
@@ -25,7 +65,7 @@ COPY DeepSeek-OCR-vllm/ /app/
 # Make entrypoint script executable
 RUN chmod +x /app/docker-entrypoint.sh
 
-# Create directory for models (can be mounted as volume)
+# Create directory for models
 RUN mkdir -p /app/models
 
 # Expose API port
@@ -42,5 +82,5 @@ ENV HOST=0.0.0.0 \
     VLLM_USE_V1=1
 
 # Use bash as entrypoint to run our script
-ENTRYPOINT ["/bin/bash", "/app/docker-entrypoint.sh"]
+ENTRYPOINT ["./start_server.sh"]
 
