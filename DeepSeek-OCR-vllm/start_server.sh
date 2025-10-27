@@ -14,7 +14,7 @@ echo "=========================================="
 
 # 执行 API 服务器
 python3 openai_api_server.py \
-    --host "${HOST:-0.0.0.0}" \
-    --port "${PORT:-8000}" \
+    --host 0.0.0.0 \
+    --port 8000 \
     --workers 1
 
