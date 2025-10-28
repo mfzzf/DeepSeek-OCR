@@ -47,7 +47,7 @@ from vllm import AsyncLLMEngine
 
 from deepseek_ocr import DeepseekOCRForCausalLM
 from process.image_process import DeepseekOCRProcessor
-from config import MODEL_PATH, CROP_MODE
+from config import MODEL_PATH, CROP_MODE, TOKENIZER
 # Note: NoRepeatNGramLogitsProcessor is not compatible with V1 engine
 
 # Register the model
@@ -149,6 +149,7 @@ class ChatCompletionStreamResponse(BaseModel):
     created: int
     model: str
     choices: List[ChatCompletionStreamChoice]
+    usage: Optional[Usage] = None  # Include usage in final chunk
 
 
 class ModelInfo(BaseModel):
@@ -263,6 +264,7 @@ def parse_messages(messages: List[ChatMessage]) -> tuple[str, Optional[Image.Ima
 async def generate_stream(
     request_id: str,
     prompt: str,
+    image: Optional[Image.Image],
     image_features: Optional[Dict],
     sampling_params: SamplingParams,
     model_name: str
@@ -335,21 +337,42 @@ async def generate_stream(
                 )
                 yield f"data: {chunk.model_dump_json()}\n\n"
 
-    # Final chunk with finish_reason
+    # Final chunk with finish_reason and usage information
     elapsed_time = time.time() - start_time
     
-    # if printed_length == 0:
-    #     logger.warning(f"[{request_id}] Streaming generated empty response!")
-    # else:
-    #     # Log a preview of the first output chunk for verification
-    #     if printed_length > 0:
-    #         # Get the last full_text for preview (stored in last iteration)
-    #         logger.debug(f"[{request_id}] First 200 chars of output: {full_text[:200].replace(chr(10), '\\n')}")
+    # Calculate token counts accurately
+    try:
+        # Count prompt tokens
+        prompt_token_ids = TOKENIZER.encode(prompt, add_special_tokens=False)
+        prompt_tokens = len(prompt_token_ids)
+        
+        # Add image tokens if image is present
+        if image is not None and image_features is not None:
+            if isinstance(image_features, dict) and 'pixel_values' in image_features:
+                pixel_values = image_features['pixel_values']
+                if hasattr(pixel_values, 'shape'):
+                    if len(pixel_values.shape) >= 4:
+                        num_image_patches = pixel_values.shape[0] if len(pixel_values.shape) == 4 else pixel_values.shape[1]
+                        prompt_tokens += num_image_patches * 256
+                        logger.debug(f"[{request_id}] Streaming: Added image tokens for {num_image_patches} patches")
+        
+        # Count completion tokens from generated text
+        output_token_ids = TOKENIZER.encode(full_text, add_special_tokens=False)
+        completion_tokens = len(output_token_ids)
+        
+    except Exception as e:
+        logger.warning(f"[{request_id}] Failed to accurately count tokens in streaming, using fallback: {e}")
+        prompt_tokens = len(prompt.split())
+        completion_tokens = len(full_text.split()) if full_text else 0
     
-    throughput_stream = printed_length / elapsed_time if elapsed_time > 0 and printed_length > 0 else 0.0
+    total_tokens = prompt_tokens + completion_tokens
+    
+    throughput_stream = completion_tokens / elapsed_time if elapsed_time > 0 and completion_tokens > 0 else 0.0
     logger.info(f"[{request_id}] Streaming generation complete: "
-                f"output_length={printed_length}, chunks={token_count}, iterations={iteration_count}, "
-                f"elapsed={elapsed_time:.2f}s, throughput={throughput_stream:.2f} chars/s")
+                f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}, "
+                f"total_tokens={total_tokens}, chunks={token_count}, iterations={iteration_count}, "
+                f"elapsed={elapsed_time:.2f}s, throughput={throughput_stream:.2f} tokens/s")
+    
     final_chunk = ChatCompletionStreamResponse(
         id=request_id,
         created=created_time,
@@ -360,7 +383,12 @@ async def generate_stream(
                 delta={},
                 finish_reason="stop"
             )
-        ]
+        ],
+        usage=Usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens
+        )
     )
     yield f"data: {final_chunk.model_dump_json()}\n\n"
     yield "data: [DONE]\n\n"
@@ -492,7 +520,7 @@ async def create_chat_completion(request: ChatCompletionRequest):
         if request.stream:
             logger.info(f"[{request_id}] Initiating streaming response")
             return StreamingResponse(
-                generate_stream(request_id, prompt, image_features, sampling_params, request.model),
+                generate_stream(request_id, prompt, image, image_features, sampling_params, request.model),
                 media_type="text/event-stream"
             )
 
@@ -539,14 +567,48 @@ async def create_chat_completion(request: ChatCompletionRequest):
         
         elapsed_time = time.time() - start_time
         
-        # Calculate token counts (approximate)
-        prompt_tokens = len(prompt.split())
-        completion_tokens = len(output_text.split()) if output_text else 0
+        # Calculate token counts accurately using tokenizer
+        # Count prompt tokens
+        try:
+            prompt_token_ids = TOKENIZER.encode(prompt, add_special_tokens=False)
+            prompt_tokens = len(prompt_token_ids)
+            
+            # Add image tokens if image is present
+            if image is not None and image_features is not None:
+                # Image features contain the actual image tokens
+                # Each image can have multiple tokens depending on cropping
+                if isinstance(image_features, dict) and 'pixel_values' in image_features:
+                    # Estimate image tokens based on pixel_values shape
+                    pixel_values = image_features['pixel_values']
+                    if hasattr(pixel_values, 'shape'):
+                        # Typically: (batch, num_patches, channels, height, width)
+                        # or (num_patches, channels, height, width)
+                        if len(pixel_values.shape) >= 4:
+                            num_image_patches = pixel_values.shape[0] if len(pixel_values.shape) == 4 else pixel_values.shape[1]
+                            # Each patch typically corresponds to multiple tokens
+                            # For DeepSeek-OCR, this can vary based on the model architecture
+                            prompt_tokens += num_image_patches * 256  # Approximate tokens per patch
+                            logger.debug(f"[{request_id}] Added image tokens: num_patches={num_image_patches}")
+        except Exception as e:
+            logger.warning(f"[{request_id}] Failed to accurately count prompt tokens, using fallback: {e}")
+            prompt_tokens = len(prompt.split())
+        
+        # Count completion tokens from actual token_ids
+        if hasattr(final_output, 'token_ids') and final_output.token_ids:
+            completion_tokens = len(final_output.token_ids)
+            logger.debug(f"[{request_id}] Completion tokens from token_ids: {completion_tokens}")
+        else:
+            # Fallback: encode the output text
+            try:
+                output_token_ids = TOKENIZER.encode(output_text, add_special_tokens=False)
+                completion_tokens = len(output_token_ids)
+            except Exception as e:
+                logger.warning(f"[{request_id}] Failed to accurately count completion tokens, using fallback: {e}")
+                completion_tokens = len(output_text.split()) if output_text else 0
         
         if completion_tokens == 0:
             logger.warning(f"[{request_id}] Generated empty response! "
                           f"output_text='{output_text}' (length={len(output_text)})")
-            # Log token_ids if available for debugging
             if hasattr(final_output, 'token_ids'):
                 logger.debug(f"[{request_id}] token_ids: {final_output.token_ids}")
         
