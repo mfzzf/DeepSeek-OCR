@@ -1,86 +1,86 @@
-# DeepSeek-OCR vLLM API Server Dockerfile
-# Alternative build for CUDA 12.4 compatibility
-# This builds with specific CUDA version
+# DeepSeek-OCR Docker - 使用本地环境依赖
+# 这个版本复制本地 py312 环境的包，避免版本冲突
+# 使用 devel 版本以支持 flash-attn 编译
 
 FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
 
-# Set environment variables
+# 设置环境变量
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    CUDA_HOME=/usr/local/cuda \
-    PATH=/usr/local/cuda/bin:$PATH \
-    LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+    PYTHONDONTWRITEBYTECODE=1
 
-# Install system dependencies
+# 安装系统依赖和 Python 3.12
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 \
-    python3-pip \
-    python3-dev \
+    software-properties-common \
+    build-essential \
     git \
     wget \
     curl \
     ca-certificates \
-    build-essential \
-    cmake \
-    ninja-build \
     libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
     libxrender-dev \
     libgomp1 \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-dev \
+    python3.12-venv \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Create symlink for python
-RUN ln -sf /usr/bin/python3 /usr/bin/python
+# 安装 pip for Python 3.12
+RUN wget https://bootstrap.pypa.io/get-pip.py && \
+    python3.12 get-pip.py && \
+    rm get-pip.py
 
-# Upgrade pip
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+# 设置 Python 3.12 为默认
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
 
-# Set working directory
+# 升级 pip
+RUN python3 -m pip install --upgrade pip setuptools wheel
+
+# 设置工作目录
 WORKDIR /app
 
-# Install PyTorch with CUDA 12.4 support
-RUN pip install --no-cache-dir \
-    torch==2.4.0 \
-    torchvision==0.19.0 \
-    --index-url https://download.pytorch.org/whl/cu124
+# 复制依赖文件
+COPY DeepSeek-OCR-vllm/requirements_docker.txt /app/
 
-# Install vLLM from PyPI (compatible with CUDA 12.4)
-RUN pip install --no-cache-dir vllm==0.6.4.post1
+# 先安装 PyTorch（flash-attn 编译需要）
+RUN pip install --no-cache-dir torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0
 
-# Copy requirements files
-COPY requirements.txt /app/
-COPY DeepSeek-OCR-vllm/requirements_api.txt /app/
+# 安装 flash-attn 编译所需的依赖
+RUN pip install --no-cache-dir ninja packaging psutil
 
-# Install other dependencies
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir -r requirements_api.txt
+# 安装 flash-attn（需要从源码编译，耗时较长，约 5-10 分钟）
+RUN pip install --no-cache-dir flash-attn --no-build-isolation
 
-# Copy application code
+# 安装其他依赖（使用本地 py312 环境验证过的版本）
+RUN pip install --no-cache-dir -r requirements_docker.txt
+
+# 复制应用代码
 COPY DeepSeek-OCR-vllm/ /app/
 
-# Make entrypoint script executable
-RUN chmod +x /app/docker-entrypoint.sh
-
-# Create directory for models
+# 创建模型目录
 RUN mkdir -p /app/models
 
-# Expose API port
+# 暴露端口
 EXPOSE 8000
 
-# Health check
+# 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Set default environment variables
+# 设置环境变量
 ENV HOST=0.0.0.0 \
     PORT=8000 \
     LOG_LEVEL=INFO \
     VLLM_USE_V1=1
 
-# Use bash as entrypoint to run our script
-ENTRYPOINT ["./start_server.sh"]
+# 启动命令
+CMD ["python3", "openai_api_server.py", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
 
