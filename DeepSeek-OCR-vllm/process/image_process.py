@@ -272,28 +272,19 @@ class DeepseekOCRProcessor(ProcessorMixin):
         input_ids, pixel_values, images_crop, images_seq_mask, images_spatial_crop, num_image_tokens, _ = images[0]
 
 
-        return {
-            "input_ids": input_ids,
-            "pixel_values": pixel_values,
-            "images_crop": images_crop,
-            "images_seq_mask": images_seq_mask,
-            "images_spatial_crop": images_spatial_crop,
-            "num_image_tokens": num_image_tokens,
-        }
-
-
-        # prepare = BatchFeature(
-        #     data=dict(
-        #         input_ids=input_ids,
-        #         pixel_values=pixel_values,
-        #         images_crop = images_crop,
-        #         images_seq_mask=images_seq_mask,
-        #         images_spatial_crop=images_spatial_crop,
-        #         num_image_tokens=num_image_tokens,
-        #     ),
-        #     tensor_type="pt",
-        # )
-        # return prepare
+        # Return BatchFeature to match ProcessorMixin behaviour
+        prepare = BatchFeature(
+            data=dict(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                images_crop=images_crop,
+                images_seq_mask=images_seq_mask,
+                images_spatial_crop=images_spatial_crop,
+                num_image_tokens=num_image_tokens,
+            ),
+            tensor_type="pt",
+        )
+        return prepare
 
     def __call__(
         self,

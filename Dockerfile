@@ -50,10 +50,10 @@ WORKDIR /app
 # 复制依赖文件
 COPY DeepSeek-OCR-vllm/requirements_docker.txt /app/
 
-# 先安装 PyTorch（flash-attn 编译需要）
+# 先安装 PyTorch（flash-attn 和 flashinfer 编译需要）
 RUN pip install --no-cache-dir torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0
 
-# 安装 flash-attn 编译所需的依赖
+# 安装编译所需的依赖
 RUN pip install --no-cache-dir ninja packaging psutil
 
 # 安装 flash-attn（需要从源码编译，耗时较长，约 5-10 分钟）
@@ -61,6 +61,11 @@ RUN pip install --no-cache-dir flash-attn --no-build-isolation
 
 # 安装其他依赖（使用本地 py312 环境验证过的版本）
 RUN pip install --no-cache-dir -r requirements_docker.txt
+
+# 注意：FlashInfer 目前没有 torch 2.8 的预编译版本，暂时跳过安装
+# 不影响功能，只会使用 PyTorch 原生的 top-p & top-k 采样实现（性能略低但完全可用）
+# 等 FlashInfer 发布 torch 2.8 版本后可以添加：
+# RUN pip install --no-cache-dir flashinfer -i https://flashinfer.ai/whl/cu124/torch2.8/
 
 # 复制应用代码
 COPY DeepSeek-OCR-vllm/ /app/

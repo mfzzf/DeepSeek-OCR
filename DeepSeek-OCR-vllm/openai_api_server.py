@@ -18,6 +18,7 @@ import io
 import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Dict, List, Literal, Optional, Union
 
 import torch
@@ -57,7 +58,72 @@ ModelRegistry.register_model("DeepseekOCRForCausalLM", DeepseekOCRForCausalLM)
 if torch.version.cuda == '11.8':
     os.environ["TRITON_PTXAS_PATH"] = "/usr/local/cuda-11.8/bin/ptxas"
 
-app = FastAPI(title="DeepSeek-OCR OpenAI-Compatible API")
+# Global engine instance
+engine: Optional[AsyncLLMEngine] = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events."""
+    global engine
+    
+    # Startup
+    logger.info("="*80)
+    logger.info("Starting DeepSeek-OCR vLLM engine initialization...")
+    logger.info(f"Model path: {MODEL_PATH}")
+    logger.info(f"Crop mode: {CROP_MODE}")
+    logger.info("="*80)
+
+    engine_args = AsyncEngineArgs(
+        model=MODEL_PATH,
+        hf_overrides={"architectures": ["DeepseekOCRForCausalLM"]},
+        block_size=256,
+        max_model_len=8192,
+        enforce_eager=True,  # Disable torch.compile to avoid warning
+        trust_remote_code=True,
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.9,
+        disable_mm_preprocessor_cache=True,
+    )
+
+    logger.info("Engine configuration:")
+    logger.info(f"  - block_size: 256")
+    logger.info(f"  - max_model_len: 8192")
+    logger.info(f"  - tensor_parallel_size: 1")
+    logger.info(f"  - gpu_memory_utilization: 0.9")
+    logger.info(f"  - enforce_eager: True (torch.compile disabled)")
+    
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
+    logger.info("="*80)
+    logger.info("✓ DeepSeek-OCR engine initialized successfully!")
+    logger.info("="*80)
+    
+    yield
+    
+    # Shutdown
+    if engine is not None:
+        logger.info("="*80)
+        logger.info("Shutting down DeepSeek-OCR engine...")
+        try:
+            # Shutdown the engine to free GPU memory
+            await engine.shutdown()
+            logger.info("✓ Engine shutdown complete")
+        except Exception as e:
+            logger.error(f"Error during engine shutdown: {e}", exc_info=True)
+        finally:
+            engine = None
+            # Force garbage collection and clear CUDA cache
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+            logger.info("✓ GPU memory cleared")
+            logger.info("="*80)
+
+
+app = FastAPI(
+    title="DeepSeek-OCR OpenAI-Compatible API",
+    lifespan=lifespan
+)
 
 # Add CORS middleware
 app.add_middleware(
@@ -67,9 +133,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Global engine instance
-engine: Optional[AsyncLLMEngine] = None
 
 
 # ===== OpenAI API Models =====
@@ -395,66 +458,6 @@ async def generate_stream(
 
 
 # ===== API Endpoints =====
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the vLLM engine on startup."""
-    global engine
-
-    logger.info("="*80)
-    logger.info("Starting DeepSeek-OCR vLLM engine initialization...")
-    logger.info(f"Model path: {MODEL_PATH}")
-    logger.info(f"Crop mode: {CROP_MODE}")
-    logger.info("="*80)
-
-    engine_args = AsyncEngineArgs(
-        model=MODEL_PATH,
-        hf_overrides={"architectures": ["DeepseekOCRForCausalLM"]},
-        block_size=256,
-        max_model_len=8192,
-        enforce_eager=False,
-        trust_remote_code=True,
-        tensor_parallel_size=1,
-        gpu_memory_utilization=0.9,
-        disable_mm_preprocessor_cache=True,
-    )
-
-    logger.info("Engine configuration:")
-    logger.info(f"  - block_size: 256")
-    logger.info(f"  - max_model_len: 8192")
-    logger.info(f"  - tensor_parallel_size: 1")
-    logger.info(f"  - gpu_memory_utilization: 0.9")
-    logger.info(f"  - enforce_eager: False")
-    
-    engine = AsyncLLMEngine.from_engine_args(engine_args)
-    logger.info("="*80)
-    logger.info("✓ DeepSeek-OCR engine initialized successfully!")
-    logger.info("="*80)
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up resources on shutdown."""
-    global engine
-    
-    if engine is not None:
-        logger.info("="*80)
-        logger.info("Shutting down DeepSeek-OCR engine...")
-        try:
-            # Shutdown the engine to free GPU memory
-            await engine.shutdown()
-            logger.info("✓ Engine shutdown complete")
-        except Exception as e:
-            logger.error(f"Error during engine shutdown: {e}", exc_info=True)
-        finally:
-            engine = None
-            # Force garbage collection and clear CUDA cache
-            import gc
-            gc.collect()
-            torch.cuda.empty_cache()
-            logger.info("✓ GPU memory cleared")
-            logger.info("="*80)
-
 
 @app.get("/v1/models")
 async def list_models() -> ModelList:
