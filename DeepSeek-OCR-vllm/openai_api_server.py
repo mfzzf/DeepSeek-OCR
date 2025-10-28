@@ -181,11 +181,27 @@ class ChatCompletionChoice(BaseModel):
     logprobs: Optional[Dict] = None
 
 
+class PromptTokensDetails(BaseModel):
+    """Details about prompt tokens usage."""
+    cached_tokens: int = 0
+    audio_tokens: Optional[int] = None
+    
+
+class CompletionTokensDetails(BaseModel):
+    """Details about completion tokens usage."""
+    reasoning_tokens: Optional[int] = None
+    audio_tokens: Optional[int] = None
+    accepted_prediction_tokens: Optional[int] = None
+    rejected_prediction_tokens: Optional[int] = None
+
+
 class Usage(BaseModel):
     """Token usage statistics."""
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    prompt_tokens_details: Optional[PromptTokensDetails] = None
+    completion_tokens_details: Optional[CompletionTokensDetails] = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -370,8 +386,17 @@ async def generate_stream(
     token_count = 0
     iteration_count = 0
     full_text = ""
+    num_cached_tokens = 0
+    final_request_output = None
+    
     async for request_output in engine.generate(request, sampling_params, request_id):
         iteration_count += 1
+        final_request_output = request_output
+        
+        # Extract cached tokens info from the request output
+        if hasattr(request_output, 'num_cached_tokens') and request_output.num_cached_tokens is not None:
+            num_cached_tokens = request_output.num_cached_tokens
+        
         if request_output.outputs:
             output_obj = request_output.outputs[0]
             full_text = output_obj.text if hasattr(output_obj, 'text') else str(output_obj)
@@ -405,19 +430,24 @@ async def generate_stream(
     
     # Calculate token counts accurately
     try:
-        # Count prompt tokens
-        prompt_token_ids = TOKENIZER.encode(prompt, add_special_tokens=False)
-        prompt_tokens = len(prompt_token_ids)
-        
-        # Add image tokens if image is present
-        if image is not None and image_features is not None:
-            if isinstance(image_features, dict) and 'pixel_values' in image_features:
-                pixel_values = image_features['pixel_values']
-                if hasattr(pixel_values, 'shape'):
-                    if len(pixel_values.shape) >= 4:
-                        num_image_patches = pixel_values.shape[0] if len(pixel_values.shape) == 4 else pixel_values.shape[1]
-                        prompt_tokens += num_image_patches * 256
-                        logger.debug(f"[{request_id}] Streaming: Added image tokens for {num_image_patches} patches")
+        # Get prompt tokens from the request output (includes image tokens)
+        if final_request_output and hasattr(final_request_output, 'prompt_token_ids') and final_request_output.prompt_token_ids:
+            prompt_tokens = len(final_request_output.prompt_token_ids)
+            logger.debug(f"[{request_id}] Streaming: Got prompt_tokens from request_output: {prompt_tokens}")
+        else:
+            # Fallback: manually count prompt tokens
+            prompt_token_ids = TOKENIZER.encode(prompt, add_special_tokens=False)
+            prompt_tokens = len(prompt_token_ids)
+            
+            # Add image tokens if image is present
+            if image is not None and image_features is not None:
+                if isinstance(image_features, dict) and 'pixel_values' in image_features:
+                    pixel_values = image_features['pixel_values']
+                    if hasattr(pixel_values, 'shape'):
+                        if len(pixel_values.shape) >= 4:
+                            num_image_patches = pixel_values.shape[0] if len(pixel_values.shape) == 4 else pixel_values.shape[1]
+                            prompt_tokens += num_image_patches * 256
+                            logger.debug(f"[{request_id}] Streaming: Added image tokens for {num_image_patches} patches")
         
         # Count completion tokens from generated text
         output_token_ids = TOKENIZER.encode(full_text, add_special_tokens=False)
@@ -430,11 +460,26 @@ async def generate_stream(
     
     total_tokens = prompt_tokens + completion_tokens
     
+    # Log cache hit information
+    if num_cached_tokens > 0:
+        logger.info(f"[{request_id}] Cache hit: {num_cached_tokens} tokens cached out of {prompt_tokens} prompt tokens")
+    
     throughput_stream = completion_tokens / elapsed_time if elapsed_time > 0 and completion_tokens > 0 else 0.0
     logger.info(f"[{request_id}] Streaming generation complete: "
                 f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}, "
-                f"total_tokens={total_tokens}, chunks={token_count}, iterations={iteration_count}, "
+                f"total_tokens={total_tokens}, cached_tokens={num_cached_tokens}, "
+                f"chunks={token_count}, iterations={iteration_count}, "
                 f"elapsed={elapsed_time:.2f}s, throughput={throughput_stream:.2f} tokens/s")
+    
+    # Create usage with cache details
+    usage = Usage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        prompt_tokens_details=PromptTokensDetails(
+            cached_tokens=num_cached_tokens
+        ) if num_cached_tokens > 0 else None
+    )
     
     final_chunk = ChatCompletionStreamResponse(
         id=request_id,
@@ -447,11 +492,7 @@ async def generate_stream(
                 finish_reason="stop"
             )
         ],
-        usage=Usage(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens
-        )
+        usage=usage
     )
     yield f"data: {final_chunk.model_dump_json()}\n\n"
     yield "data: [DONE]\n\n"
@@ -541,9 +582,17 @@ async def create_chat_completion(request: ChatCompletionRequest):
             logger.debug(f"[{request_id}] Non-streaming request without image, prompt_length={len(prompt)}")
 
         final_output = None
+        final_request_output = None
+        num_cached_tokens = 0
         iteration_count = 0
         async for request_output in engine.generate(gen_request, sampling_params, request_id):
             iteration_count += 1
+            final_request_output = request_output
+            
+            # Extract cached tokens info from the request output
+            if hasattr(request_output, 'num_cached_tokens') and request_output.num_cached_tokens is not None:
+                num_cached_tokens = request_output.num_cached_tokens
+            
             logger.debug(f"[{request_id}] Generation iteration {iteration_count}, "
                         f"outputs_count={len(request_output.outputs) if request_output.outputs else 0}")
             if request_output.outputs:
@@ -573,25 +622,31 @@ async def create_chat_completion(request: ChatCompletionRequest):
         # Calculate token counts accurately using tokenizer
         # Count prompt tokens
         try:
-            prompt_token_ids = TOKENIZER.encode(prompt, add_special_tokens=False)
-            prompt_tokens = len(prompt_token_ids)
-            
-            # Add image tokens if image is present
-            if image is not None and image_features is not None:
-                # Image features contain the actual image tokens
-                # Each image can have multiple tokens depending on cropping
-                if isinstance(image_features, dict) and 'pixel_values' in image_features:
-                    # Estimate image tokens based on pixel_values shape
-                    pixel_values = image_features['pixel_values']
-                    if hasattr(pixel_values, 'shape'):
-                        # Typically: (batch, num_patches, channels, height, width)
-                        # or (num_patches, channels, height, width)
-                        if len(pixel_values.shape) >= 4:
-                            num_image_patches = pixel_values.shape[0] if len(pixel_values.shape) == 4 else pixel_values.shape[1]
-                            # Each patch typically corresponds to multiple tokens
-                            # For DeepSeek-OCR, this can vary based on the model architecture
-                            prompt_tokens += num_image_patches * 256  # Approximate tokens per patch
-                            logger.debug(f"[{request_id}] Added image tokens: num_patches={num_image_patches}")
+            # Get prompt tokens from the request output (includes image tokens)
+            if final_request_output and hasattr(final_request_output, 'prompt_token_ids') and final_request_output.prompt_token_ids:
+                prompt_tokens = len(final_request_output.prompt_token_ids)
+                logger.debug(f"[{request_id}] Got prompt_tokens from request_output: {prompt_tokens}")
+            else:
+                # Fallback: manually count prompt tokens
+                prompt_token_ids = TOKENIZER.encode(prompt, add_special_tokens=False)
+                prompt_tokens = len(prompt_token_ids)
+                
+                # Add image tokens if image is present
+                if image is not None and image_features is not None:
+                    # Image features contain the actual image tokens
+                    # Each image can have multiple tokens depending on cropping
+                    if isinstance(image_features, dict) and 'pixel_values' in image_features:
+                        # Estimate image tokens based on pixel_values shape
+                        pixel_values = image_features['pixel_values']
+                        if hasattr(pixel_values, 'shape'):
+                            # Typically: (batch, num_patches, channels, height, width)
+                            # or (num_patches, channels, height, width)
+                            if len(pixel_values.shape) >= 4:
+                                num_image_patches = pixel_values.shape[0] if len(pixel_values.shape) == 4 else pixel_values.shape[1]
+                                # Each patch typically corresponds to multiple tokens
+                                # For DeepSeek-OCR, this can vary based on the model architecture
+                                prompt_tokens += num_image_patches * 256  # Approximate tokens per patch
+                                logger.debug(f"[{request_id}] Added image tokens: num_patches={num_image_patches}")
         except Exception as e:
             logger.warning(f"[{request_id}] Failed to accurately count prompt tokens, using fallback: {e}")
             prompt_tokens = len(prompt.split())
@@ -615,10 +670,25 @@ async def create_chat_completion(request: ChatCompletionRequest):
             if hasattr(final_output, 'token_ids'):
                 logger.debug(f"[{request_id}] token_ids: {final_output.token_ids}")
         
+        # Log cache hit information
+        if num_cached_tokens > 0:
+            logger.info(f"[{request_id}] Cache hit: {num_cached_tokens} tokens cached out of {prompt_tokens} prompt tokens")
+        
         throughput = completion_tokens / elapsed_time if elapsed_time > 0 and completion_tokens > 0 else 0.0
         logger.info(f"[{request_id}] Generation complete: "
                     f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}, "
+                    f"cached_tokens={num_cached_tokens}, "
                     f"elapsed={elapsed_time:.2f}s, throughput={throughput:.2f} tokens/s")
+
+        # Create usage with cache details
+        usage = Usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens_details=PromptTokensDetails(
+                cached_tokens=num_cached_tokens
+            ) if num_cached_tokens > 0 else None
+        )
 
         return ChatCompletionResponse(
             id=request_id,
@@ -634,11 +704,7 @@ async def create_chat_completion(request: ChatCompletionRequest):
                     finish_reason="stop"
                 )
             ],
-            usage=Usage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens
-            )
+            usage=usage
         )
 
     except HTTPException:
