@@ -82,5 +82,5 @@ ENV HOST=0.0.0.0 \
     VLLM_USE_V1=1
 
 # 启动命令
-CMD ["python3", "openai_api_server.py", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["./start_server.sh"]
 

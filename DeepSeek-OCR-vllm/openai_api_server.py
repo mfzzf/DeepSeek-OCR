@@ -407,6 +407,23 @@ async def startup_event():
     logger.info(f"Crop mode: {CROP_MODE}")
     logger.info("="*80)
 
+    # Determine tensor parallel size
+    if "TENSOR_PARALLEL_SIZE" in os.environ:
+        try:
+            tensor_parallel_size = int(os.environ["TENSOR_PARALLEL_SIZE"])
+            logger.info(f"Using TENSOR_PARALLEL_SIZE from environment: {tensor_parallel_size}")
+        except (ValueError, TypeError):
+            logger.warning("Invalid TENSOR_PARALLEL_SIZE environment variable. Defaulting to 1.")
+            tensor_parallel_size = 1
+    else:
+        # Automatically detect available GPUs
+        if torch.cuda.is_available():
+            tensor_parallel_size = torch.cuda.device_count()
+            logger.info(f"Automatically detected {tensor_parallel_size} GPUs.")
+        else:
+            logger.warning("No CUDA GPUs detected. Defaulting to tensor_parallel_size=1.")
+            tensor_parallel_size = 1
+
     engine_args = AsyncEngineArgs(
         model=MODEL_PATH,
         hf_overrides={"architectures": ["DeepseekOCRForCausalLM"]},
@@ -414,7 +431,7 @@ async def startup_event():
         max_model_len=8192,
         enforce_eager=False,
         trust_remote_code=True,
-        tensor_parallel_size=1,
+        tensor_parallel_size=tensor_parallel_size,
         gpu_memory_utilization=0.9,
         disable_mm_preprocessor_cache=True,
     )
@@ -422,7 +439,7 @@ async def startup_event():
     logger.info("Engine configuration:")
     logger.info(f"  - block_size: 256")
     logger.info(f"  - max_model_len: 8192")
-    logger.info(f"  - tensor_parallel_size: 1")
+    logger.info(f"  - tensor_parallel_size: {tensor_parallel_size}")
     logger.info(f"  - gpu_memory_utilization: 0.9")
     logger.info(f"  - enforce_eager: False")
     
